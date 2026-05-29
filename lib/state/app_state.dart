@@ -11,6 +11,8 @@ import 'package:local_notifier/local_notifier.dart';
 import '../models/preset.dart';
 import '../models/task.dart';
 
+import '../services/sync_service.dart';
+
 class _AppSnapshot {
   final List<(String globalTaskId, String name, int remainingSeconds)> queue;
   final List<(String id, String name, int defaultMinutes)> globalTasks;
@@ -32,9 +34,17 @@ class _AppSnapshot {
       countdown = countdown;
 }
 
+class _Conflict {
+  final GlobalTask local;
+  final GlobalTask remote;
+  _Conflict({required this.local, required this.remote});
+}
+
 class AppState extends ChangeNotifier {
   final SharedPreferences prefs;
   final AudioPlayer _audioPlayer = AudioPlayer();
+  final SyncService _sync = SyncService(baseUrl: 'http://homenas.local:8888');
+  SyncService get syncService => _sync;
 
   List<GlobalTask> _globalTasks = [];
   List<SessionTask> _sessionQueue = [];
@@ -106,6 +116,21 @@ class AppState extends ChangeNotifier {
   set breakCount(int v) {
     _breakCount = v;
     notifyListeners();
+  }
+
+  SyncStatus _syncStatus = SyncStatus.idle;
+  SyncStatus get syncStatus => _syncStatus;
+
+  void _onSyncStatus(SyncStatus s) {
+    _syncStatus = s;
+    notifyListeners();
+  }
+
+  Future<void> retrySync() async {
+    final remote = await _sync.fetchData(onStatus: _onSyncStatus);
+    if (remote != null) {
+      _mergeRemoteData(remote);
+    }
   }
 
   AppState(this.prefs) {
@@ -429,6 +454,12 @@ class AppState extends ChangeNotifier {
   // --- PERSISTENCE ---
 
   void _saveData() {
+    final payload = {
+      'global_tasks': _globalTasks.map((t) => t.toJson()).toList(),
+      'presets': _presets.map((p) => p.toJson()).toList(),
+    };
+    final encoded = jsonEncode(payload);
+    // Always write locally
     prefs.setString(
       'global_tasks',
       jsonEncode(_globalTasks.map((t) => t.toJson()).toList()),
@@ -437,23 +468,95 @@ class AppState extends ChangeNotifier {
       'presets',
       jsonEncode(_presets.map((p) => p.toJson()).toList()),
     );
+    // Best-effort push to NAS
+    _sync.pushData(payload, onStatus: _onSyncStatus);
   }
 
-  void _loadData() {
-    final String? taskData = prefs.getString('global_tasks');
-    if (taskData != null) {
-      _globalTasks = (jsonDecode(taskData) as List)
+  Future<void> _loadData() async {
+    // Load local first so UI isn't empty while fetching
+    final Map<String, dynamic> local = {};
+    final taskData = prefs.getString('global_tasks');
+    final presetData = prefs.getString('presets');
+    if (taskData != null) local['global_tasks'] = jsonDecode(taskData);
+    if (presetData != null) local['presets'] = jsonDecode(presetData);
+    _applyData(local);
+
+    // Then try NAS
+    final remote = await _sync.fetchData(onStatus: _onSyncStatus);
+    if (remote == null) return; // unreachable, keep local
+
+    _mergeRemoteData(remote);
+  }
+
+  void _applyData(Map<String, dynamic> data) {
+    if (data['global_tasks'] != null) {
+      _globalTasks = (data['global_tasks'] as List)
           .map((i) => GlobalTask.fromJson(i))
           .toList();
     }
-    final String? presetData = prefs.getString('presets');
-    if (presetData != null) {
-      _presets = (jsonDecode(presetData) as List)
+    if (data['presets'] != null) {
+      _presets = (data['presets'] as List)
           .map((i) => Preset.fromJson(i))
           .toList();
     }
     notifyListeners();
   }
+
+  void _mergeRemoteData(Map<String, dynamic> remote) {
+    final remoteTasks = remote['global_tasks'] != null
+        ? (remote['global_tasks'] as List)
+              .map((i) => GlobalTask.fromJson(i))
+              .toList()
+        : <GlobalTask>[];
+    final remotePresets = remote['presets'] != null
+        ? (remote['presets'] as List).map((i) => Preset.fromJson(i)).toList()
+        : <Preset>[];
+
+    // Add remote items that don't exist locally (by id)
+    final localTaskIds = _globalTasks.map((t) => t.id).toSet();
+    final localPresetIds = _presets.map((p) => p.id).toSet();
+
+    for (final t in remoteTasks) {
+      if (!localTaskIds.contains(t.id)) _globalTasks.add(t);
+    }
+    for (final p in remotePresets) {
+      if (!localPresetIds.contains(p.id)) _presets.add(p);
+    }
+
+    // Find conflicts: same id, different content
+    _pendingConflicts = [];
+    for (final remote in remoteTasks) {
+      final local = _globalTasks.firstWhere(
+        (t) => t.id == remote.id,
+        orElse: () => remote,
+      );
+      if (local.name != remote.name ||
+          local.defaultMinutes != remote.defaultMinutes) {
+        _pendingConflicts.add(_Conflict(local: local, remote: remote));
+      }
+    }
+
+    notifyListeners(); // triggers UI to show conflict dialog if needed
+
+    // Push merged result back to NAS
+    _saveData();
+  }
+
+  // Conflict resolution — called from UI
+  void resolveConflict(_Conflict conflict, bool useRemote) {
+    if (useRemote) {
+      final idx = _globalTasks.indexWhere((t) => t.id == conflict.remote.id);
+      if (idx != -1) {
+        _globalTasks[idx] = conflict.remote;
+      }
+    }
+    _pendingConflicts.remove(conflict);
+    _saveData();
+    notifyListeners();
+  }
+
+  List<_Conflict> _pendingConflicts = [];
+  List<_Conflict> get pendingConflicts => _pendingConflicts;
 
   // --- AUDIO ---
 

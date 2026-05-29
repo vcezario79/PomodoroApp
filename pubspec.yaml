@@ -39,6 +39,7 @@ dependencies:
   uuid: ^4.3.3
   audioplayers: ^5.2.1
   local_notifier: ^0.1.5
+  http: ^1.2.0
 
 dev_dependencies:
   flutter_test:

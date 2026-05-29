@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../models/task.dart';
 import '../state/app_state.dart';
+import '../services/sync_service.dart';
 
 class SettingsPanel extends StatelessWidget {
   const SettingsPanel({super.key});
@@ -122,6 +123,76 @@ class SettingsPanel extends StatelessWidget {
           ),
         ),
         const Divider(height: 1),
+        const Spacer(),
+        const Divider(height: 1),
+        const Spacer(),
+        const Divider(height: 1),
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Builder(
+            builder: (context) {
+              final state = context.watch<AppState>();
+              final status = state.syncStatus;
+              final lastSynced = state.syncService.lastSynced;
+
+              final (icon, color) = switch (status) {
+                SyncStatus.idle => (Icons.cloud_outlined, Colors.white38),
+                SyncStatus.loading => (Icons.cloud_sync, Colors.white54),
+                SyncStatus.synced => (Icons.cloud_done, Colors.greenAccent),
+                SyncStatus.error => (
+                  Icons.cloud_off_outlined,
+                  Colors.redAccent,
+                ),
+              };
+
+              String label;
+              if (status == SyncStatus.synced && lastSynced != null) {
+                final h = lastSynced.hour.toString().padLeft(2, '0');
+                final m = lastSynced.minute.toString().padLeft(2, '0');
+                label = "Last synced $h:$m";
+              } else if (status == SyncStatus.error) {
+                label = "NAS unreachable";
+              } else if (status == SyncStatus.loading) {
+                label = "Syncing...";
+              } else {
+                label = "Not synced";
+              }
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      status == SyncStatus.loading
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(icon, size: 16, color: color),
+                      const SizedBox(width: 8),
+                      Text(label, style: TextStyle(fontSize: 12, color: color)),
+                      if (status == SyncStatus.error) ...[
+                        const Spacer(),
+                        IconButton(
+                          iconSize: 14,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: "Retry connection",
+                          onPressed: () => context.read<AppState>().retrySync(),
+                          icon: const Icon(
+                            Icons.refresh,
+                            //color: Colors.redAccent,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
       ],
     );
   }

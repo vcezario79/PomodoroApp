@@ -30,7 +30,7 @@ class PomodoroApp extends StatelessWidget {
         primaryColor: Colors.indigoAccent,
         useMaterial3: true,
       ),
-      home: const MainScreen(),
+      home: MainScreen(),
     );
   }
 }
